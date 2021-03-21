@@ -267,6 +267,7 @@ const struct auth	*auth_new_chap(struct auth_group *ag,
 const struct auth	*auth_new_chap_mutual(struct auth_group *ag,
 			    const char *user, const char *secret,
 			    const char *user2, const char *secret2);
+void auth_delete(struct auth *auth);
 const struct auth	*auth_find(const struct auth_group *ag,
 			    const char *user);
 
