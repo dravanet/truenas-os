@@ -53,6 +53,7 @@ __FBSDID("$FreeBSD$");
 
 #include "ctld.h"
 #include "isns.h"
+#include "control.h"
 
 static bool	timed_out(void);
 #ifdef ICL_KERNEL_PROXY
@@ -83,8 +84,8 @@ static void
 usage(void)
 {
 
-	fprintf(stderr, "usage: ctld [-d][-u][-f config-file]\n");
-	fprintf(stderr, "       ctld -t [-u][-f config-file]\n");
+	fprintf(stderr, "usage: ctld [-d][-u][-f config-file][-c control-socket]\n");
+	fprintf(stderr, "       ctld -t [-u][-f config-file][-c control-socket]\n");
 	exit(1);
 }
 
@@ -155,7 +156,7 @@ auth_new(struct auth_group *ag)
 	return (auth);
 }
 
-static void
+void
 auth_delete(struct auth *auth)
 {
 	TAILQ_REMOVE(&auth->a_auth_group->ag_auths, auth, a_next);
@@ -2146,12 +2147,6 @@ conf_apply(struct conf *oldconf, struct conf *newconf)
 	TAILQ_FOREACH(newpg, &newconf->conf_portal_groups, pg_next) {
 		if (newpg->pg_foreign)
 			continue;
-		if (newpg->pg_unassigned) {
-			log_debugx("not listening on portal-group \"%s\", "
-			    "not assigned to any target",
-			    newpg->pg_name);
-			continue;
-		}
 		TAILQ_FOREACH(newp, &newpg->pg_portals, p_next) {
 			/*
 			 * Try to find already open portal and reuse
@@ -2572,6 +2567,7 @@ found:
 				TAILQ_FOREACH(portal, &pg->pg_portals, p_next)
 					nfds = fd_add(portal->p_socket, &fdset, nfds);
 			}
+			nfds = control_add_fds(&fdset, nfds);
 			error = select(nfds + 1, &fdset, NULL, NULL, NULL);
 			if (error <= 0) {
 				if (errno == EINTR)
@@ -2599,6 +2595,7 @@ found:
 					break;
 				}
 			}
+			control_handle_fds(conf, &fdset);
 #ifdef ICL_KERNEL_PROXY
 		}
 #endif
@@ -2767,8 +2764,9 @@ main(int argc, char **argv)
 	bool dont_daemonize = false;
 	bool test_config = false;
 	bool use_ucl = false;
+	const char *control_socket = "/var/run/ctld.sock";
 
-	while ((ch = getopt(argc, argv, "dtuf:R")) != -1) {
+	while ((ch = getopt(argc, argv, "dtuf:Rc:")) != -1) {
 		switch (ch) {
 		case 'd':
 			dont_daemonize = true;
@@ -2789,6 +2787,13 @@ main(int argc, char **argv)
 			    "does not support iSER protocol");
 #endif
 			proxy_mode = true;
+			break;
+		case 'c':
+			if (strcmp(optarg, "") == 0) {
+				control_socket = NULL;
+			} else {
+				control_socket = optarg;
+			}
 			break;
 		case '?':
 		default:
@@ -2824,6 +2829,13 @@ main(int argc, char **argv)
 	oldconf = NULL;
 
 	register_signals();
+
+	// Open control-socket
+	if (control_socket != NULL) {
+		if (control_init(control_socket) != 0) {
+			log_errx(2, "failed to open control-socket; exiting");
+		}
+	}
 
 	if (dont_daemonize == false) {
 		log_debugx("daemonizing");
@@ -2867,6 +2879,8 @@ main(int argc, char **argv)
 
 			log_debugx("removing CTL iSCSI ports "
 			    "and terminating all connections");
+
+			control_shutdown();
 
 			oldconf = newconf;
 			newconf = conf_new();
