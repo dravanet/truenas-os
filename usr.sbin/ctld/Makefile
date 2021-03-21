@@ -7,7 +7,7 @@ CFLAGS+=-I${SRCTOP}/contrib/libucl/include
 
 PROG=		ctld
 SRCS=		chap.c ctld.c discovery.c isns.c kernel.c keys.c log.c
-SRCS+=		login.c parse.y pdu.c token.l y.tab.h uclparse.c
+SRCS+=		login.c parse.y pdu.c token.l y.tab.h uclparse.c control.c
 CFLAGS+=	-I${.CURDIR}
 CFLAGS+=	-I${SRCTOP}/sys
 CFLAGS+=	-I${SRCTOP}/sys/cam/ctl
