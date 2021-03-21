@@ -1407,3 +1407,9 @@ kernel_capsicate(void)
 		log_warnx("Capsicum capability mode not supported");
 }
 
+extern int kernel_get_ctl_fd(void);
+
+int kernel_get_ctl_fd(void)
+{
+	return ctl_fd;
+}
