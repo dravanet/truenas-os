@@ -3114,6 +3114,12 @@ nfsv4_fillattr(struct nfsrv_descript *nd, struct mount *mp, vnode_t vp,
 				*tl = newnfs_false;
 			retnum += NFSX_UNSIGNED;
 			break;
+		case NFSATTRBIT_CHANGEATTRTYPE:
+			NFSM_BUILD(tl, uint32_t *, NFSX_UNSIGNED);
+			*tl = txdr_unsigned(
+			   NFSV4CHANGETYPE_VERS_COUNTER_NOPNFS);
+			retnum += NFSX_UNSIGNED;
+			break;
 		default:
 			printf("EEK! Bad V4 attribute bitpos=%d\n", bitpos);
 		}
