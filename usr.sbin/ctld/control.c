@@ -148,7 +148,7 @@ int control_init(const char *sock)
 		return -1;
 	}
 
-	if (listen(control_fd, 0) == -1) {
+	if (listen(control_fd, 10) == -1) {
 		close(control_fd);
 		control_fd = -1;
 		return -1;
