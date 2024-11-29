@@ -253,6 +253,7 @@ int dladdr(const void *, Dl_info *) __exported;
 void dllockinit(void *, void *(*)(void *), void (*)(void *), void (*)(void *),
     void (*)(void *), void (*)(void *), void (*)(void *)) __exported;
 int dlinfo(void *, int , void *) __exported;
+int _dl_iterate_phdr_locked(__dl_iterate_hdr_callback, void *) __exported;
 int dl_iterate_phdr(__dl_iterate_hdr_callback, void *) __exported;
 int _rtld_addr_phdr(const void *, struct dl_phdr_info *) __exported;
 int _rtld_get_stack_prot(void) __exported;
@@ -2403,11 +2404,6 @@ init_rtld(caddr_t mapbase, Elf_Auxinfo **aux_info)
     const Elf_Dyn *dyn_soname;
     const Elf_Dyn *dyn_runpath;
 
-#ifdef RTLD_INIT_PAGESIZES_EARLY
-    /* The page size is required by the dynamic memory allocator. */
-    init_pagesizes(aux_info);
-#endif
-
     /*
      * Conjure up an Obj_Entry structure for the dynamic linker.
      *
@@ -2442,10 +2438,8 @@ init_rtld(caddr_t mapbase, Elf_Auxinfo **aux_info)
     /* Now that non-local variables can be accesses, copy out obj_rtld. */
     memcpy(&obj_rtld, &objtmp, sizeof(obj_rtld));
 
-#ifndef RTLD_INIT_PAGESIZES_EARLY
     /* The page size is required by the dynamic memory allocator. */
     init_pagesizes(aux_info);
-#endif
 
     if (aux_info[AT_OSRELDATE] != NULL)
 	    osreldate = aux_info[AT_OSRELDATE]->a_un.a_val;
@@ -4206,6 +4200,29 @@ rtld_fill_dl_phdr_info(const Obj_Entry *obj, struct dl_phdr_info *phdr_info)
 	    obj->tlsindex, 0, true) + TLS_DTV_OFFSET;
 	phdr_info->dlpi_adds = obj_loads;
 	phdr_info->dlpi_subs = obj_loads - obj_count;
+}
+
+/*
+ * It's completely UB to actually use this, so extreme caution is advised.  It's
+ * probably not what you want.
+ */
+int
+_dl_iterate_phdr_locked(__dl_iterate_hdr_callback callback, void *param)
+{
+	struct dl_phdr_info phdr_info;
+	Obj_Entry *obj;
+	int error;
+
+	for (obj = globallist_curr(TAILQ_FIRST(&obj_list)); obj != NULL;
+	    obj = globallist_next(obj)) {
+		rtld_fill_dl_phdr_info(obj, &phdr_info);
+		error = callback(&phdr_info, sizeof(phdr_info), param);
+		if (error != 0)
+			return (error);
+	}
+
+	rtld_fill_dl_phdr_info(&obj_rtld, &phdr_info);
+	return (callback(&phdr_info, sizeof(phdr_info), param));
 }
 
 int
