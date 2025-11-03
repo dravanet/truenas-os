@@ -12,6 +12,30 @@ Items affecting the ports and packages system can be found in
 /usr/ports/UPDATING.  Please read that file before updating system packages
 and/or ports.
 
+20251022:
+	14.3-RELEASE-p5 SA-25:09.netinet
+
+	SO_REUSEPORT_LB breaks connect(2) for UDP sockets. [SA-25:09.netinet]
+
+20250930:
+	14.3-RELEASE-p4	EN-25:18.freebsd-update
+			SA-25:08.openssl
+
+	Fix freebsd-update(8) installing libraries in incorrect order. [EN-25:18.freebsd-update]
+
+	Fix multiple vulnerabilities in OpenSSL. [SA-25:08.openssl]
+
+20250916:
+	14.3-RELEASE-p3	EN-25:15.arm64
+			EN-25:16.vfs
+			EN-25:17.bnxt
+
+	Fix arm64 syscall(2) allows unprivileged user to panic kernel. [EN-25:15.arm64]
+
+	Fix copy_file_range(2) failing to set output parameters. [EN-25:16.vfs]
+
+	Fix bnxt(4) failing to set media type in some cases. [EN-25:17.bnxt]
+
 20250808:
 	14.3-RELEASE-p2	EN-25:12.efi
 			EN-25:13.wlan_tkip
