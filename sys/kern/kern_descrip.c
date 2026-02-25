@@ -111,7 +111,8 @@ static void	fdgrowtable_exp(struct filedesc *fdp, int nfd);
 static void	fdunused(struct filedesc *fdp, int fd);
 static void	fdused(struct filedesc *fdp, int fd);
 static int	fget_unlocked_seq(struct thread *td, int fd,
-		    cap_rights_t *needrightsp, struct file **fpp, seqc_t *seqp);
+		    const cap_rights_t *needrightsp, uint8_t *flagsp,
+		    struct file **fpp, seqc_t *seqp);
 static int	getmaxfd(struct thread *td);
 static u_long	*filecaps_copy_prep(const struct filecaps *src);
 static void	filecaps_copy_finish(const struct filecaps *src,
@@ -479,6 +480,8 @@ kern_fcntl_freebsd(struct thread *td, int fd, int cmd, long arg)
 	return (error);
 }
 
+#define	FD_RESOLVE_BENEATH	2
+
 int
 kern_fcntl(struct thread *td, int fd, int cmd, intptr_t arg)
 {
@@ -528,7 +531,9 @@ kern_fcntl(struct thread *td, int fd, int cmd, intptr_t arg)
 		fde = fdeget_noref(fdp, fd);
 		if (fde != NULL) {
 			td->td_retval[0] =
-			    (fde->fde_flags & UF_EXCLOSE) ? FD_CLOEXEC : 0;
+			    ((fde->fde_flags & UF_EXCLOSE) ? FD_CLOEXEC : 0) |
+			    ((fde->fde_flags & UF_RESOLVE_BENEATH) ?
+			    FD_RESOLVE_BENEATH : 0);
 			error = 0;
 		}
 		FILEDESC_SUNLOCK(fdp);
@@ -539,8 +544,13 @@ kern_fcntl(struct thread *td, int fd, int cmd, intptr_t arg)
 		FILEDESC_XLOCK(fdp);
 		fde = fdeget_noref(fdp, fd);
 		if (fde != NULL) {
+			/*
+			 * UF_RESOLVE_BENEATH is sticky and cannot be cleared.
+			 */
 			fde->fde_flags = (fde->fde_flags & ~UF_EXCLOSE) |
-			    (arg & FD_CLOEXEC ? UF_EXCLOSE : 0);
+			    ((arg & FD_CLOEXEC) != 0 ? UF_EXCLOSE : 0) |
+			    ((arg & FD_RESOLVE_BENEATH) != 0 ?
+			    UF_RESOLVE_BENEATH : 0);
 			error = 0;
 		}
 		FILEDESC_XUNLOCK(fdp);
@@ -2165,7 +2175,8 @@ _finstall(struct filedesc *fdp, struct file *fp, int fd, int flags,
 	seqc_write_begin(&fde->fde_seqc);
 #endif
 	fde->fde_file = fp;
-	fde->fde_flags = (flags & O_CLOEXEC) != 0 ? UF_EXCLOSE : 0;
+	fde->fde_flags = ((flags & O_CLOEXEC) != 0 ? UF_EXCLOSE : 0) |
+	    ((flags & O_RESOLVE_BENEATH) != 0 ? UF_RESOLVE_BENEATH : 0);
 	if (fcaps != NULL)
 		filecaps_move(fcaps, &fde->fde_caps);
 	else
@@ -2879,7 +2890,7 @@ finit_vnode(struct file *fp, u_int flag, void *data, const struct fileops *ops)
 }
 
 int
-fget_cap_noref(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
+fget_cap_noref(struct filedesc *fdp, int fd, const cap_rights_t *needrightsp,
     struct file **fpp, struct filecaps *havecapsp)
 {
 	struct filedescent *fde;
@@ -2912,8 +2923,8 @@ out:
 
 #ifdef CAPABILITIES
 int
-fget_cap(struct thread *td, int fd, cap_rights_t *needrightsp,
-    struct file **fpp, struct filecaps *havecapsp)
+fget_cap(struct thread *td, int fd, const cap_rights_t *needrightsp,
+    uint8_t *flagsp, struct file **fpp, struct filecaps *havecapsp)
 {
 	struct filedesc *fdp = td->td_proc->p_fd;
 	int error;
@@ -2922,7 +2933,8 @@ fget_cap(struct thread *td, int fd, cap_rights_t *needrightsp,
 
 	*fpp = NULL;
 	for (;;) {
-		error = fget_unlocked_seq(td, fd, needrightsp, &fp, &seq);
+		error = fget_unlocked_seq(td, fd, needrightsp, flagsp, &fp,
+		    &seq);
 		if (error != 0)
 			return (error);
 
@@ -2952,11 +2964,11 @@ get_locked:
 }
 #else
 int
-fget_cap(struct thread *td, int fd, cap_rights_t *needrightsp,
-    struct file **fpp, struct filecaps *havecapsp)
+fget_cap(struct thread *td, int fd, const cap_rights_t *needrightsp,
+    uint8_t *flagsp, struct file **fpp, struct filecaps *havecapsp)
 {
 	int error;
-	error = fget_unlocked(td, fd, needrightsp, fpp);
+	error = fget_unlocked_flags(td, fd, needrightsp, flagsp, fpp);
 	if (havecapsp != NULL && error == 0)
 		filecaps_fill(havecapsp);
 
@@ -3039,7 +3051,7 @@ out:
 
 #ifdef CAPABILITIES
 int
-fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
+fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, int *flagsp)
 {
 	const struct filedescent *fde;
 	const struct fdescenttbl *fdt;
@@ -3049,7 +3061,7 @@ fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
 	const cap_rights_t *haverights;
 	cap_rights_t rights;
 	seqc_t seq;
-	int fd;
+	int fd, flags;
 
 	VFS_SMR_ASSERT_ENTERED();
 
@@ -3069,7 +3081,9 @@ fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
 		return (EAGAIN);
 	if (__predict_false(cap_check_inline_transient(haverights, &rights)))
 		return (EAGAIN);
-	*fsearch = ((fp->f_flag & FSEARCH) != 0);
+	flags = fp->f_flag & FSEARCH;
+	flags |= (fde->fde_flags & UF_RESOLVE_BENEATH) != 0 ?
+	    O_RESOLVE_BENEATH : 0;
 	vp = fp->f_vnode;
 	if (__predict_false(vp == NULL)) {
 		return (EAGAIN);
@@ -3103,17 +3117,19 @@ fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
 #endif
 	}
 	*vpp = vp;
+	*flagsp = flags;
 	return (0);
 }
 #else
 int
-fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
+fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, int *flagsp)
 {
+	const struct filedescent *fde;
 	const struct fdescenttbl *fdt;
 	struct filedesc *fdp;
 	struct file *fp;
 	struct vnode *vp;
-	int fd;
+	int fd, flags;
 
 	VFS_SMR_ASSERT_ENTERED();
 
@@ -3122,10 +3138,13 @@ fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
 	fdt = fdp->fd_files;
 	if (__predict_false((u_int)fd >= fdt->fdt_nfiles))
 		return (EBADF);
-	fp = fdt->fdt_ofiles[fd].fde_file;
+	fde = &fdt->fdt_ofiles[fd];
+	fp = fde->fde_file;
 	if (__predict_false(fp == NULL))
 		return (EAGAIN);
-	*fsearch = ((fp->f_flag & FSEARCH) != 0);
+	flags = fp->f_flag & FSEARCH;
+	flags |= (fde->fde_flags & UF_RESOLVE_BENEATH) != 0 ?
+	    O_RESOLVE_BENEATH : 0;
 	vp = fp->f_vnode;
 	if (__predict_false(vp == NULL || vp->v_type != VDIR)) {
 		return (EAGAIN);
@@ -3140,6 +3159,7 @@ fgetvp_lookup_smr(struct nameidata *ndp, struct vnode **vpp, bool *fsearch)
 		return (EAGAIN);
 	filecaps_fill(&ndp->ni_filecaps);
 	*vpp = vp;
+	*flagsp = flags;
 	return (0);
 }
 #endif
@@ -3153,13 +3173,15 @@ fgetvp_lookup(struct nameidata *ndp, struct vnode **vpp)
 	struct componentname *cnp;
 	cap_rights_t rights;
 	int error;
+	uint8_t flags;
 
 	td = curthread;
 	rights = *ndp->ni_rightsneeded;
 	cap_rights_set_one(&rights, CAP_LOOKUP);
 	cnp = &ndp->ni_cnd;
 
-	error = fget_cap(td, ndp->ni_dirfd, &rights, &fp, &ndp->ni_filecaps);
+	error = fget_cap(td, ndp->ni_dirfd, &rights, &flags, &fp,
+	    &ndp->ni_filecaps);
 	if (__predict_false(error != 0))
 		return (error);
 	if (__predict_false(fp->f_ops == &badfileops)) {
@@ -3177,6 +3199,10 @@ fgetvp_lookup(struct nameidata *ndp, struct vnode **vpp)
 	 */
 	if ((fp->f_flag & FSEARCH) != 0)
 		cnp->cn_flags |= NOEXECCHECK;
+	if ((flags & UF_RESOLVE_BENEATH) != 0) {
+		cnp->cn_flags |= RBENEATH;
+		ndp->ni_resflags |= NIRES_BENEATH;
+	}
 	fdrop(fp, td);
 
 #ifdef CAPABILITIES
@@ -3223,8 +3249,8 @@ out_free:
  */
 #ifdef CAPABILITIES
 static int
-fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
-    struct file **fpp, seqc_t *seqp)
+fget_unlocked_seq(struct thread *td, int fd, const cap_rights_t *needrightsp,
+    uint8_t *flagsp, struct file **fpp, seqc_t *seqp)
 {
 	struct filedesc *fdp;
 	const struct filedescent *fde;
@@ -3233,6 +3259,7 @@ fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
 	seqc_t seq;
 	cap_rights_t haverights;
 	int error;
+	uint8_t flags;
 
 	fdp = td->td_proc->p_fd;
 	fdt = fdp->fd_files;
@@ -3244,6 +3271,7 @@ fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
 		fde = &fdt->fdt_ofiles[fd];
 		haverights = *cap_rights_fde_inline(fde);
 		fp = fde->fde_file;
+		flags = fde->fde_flags;
 		if (__predict_false(fp == NULL)) {
 			if (seqc_consistent(fd_seqc(fdt, fd), seq))
 				return (EBADF);
@@ -3272,19 +3300,21 @@ fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
 		fdrop(fp, td);
 	}
 	*fpp = fp;
-	if (seqp != NULL) {
+	if (flagsp != NULL)
+		*flagsp = flags;
+	if (seqp != NULL)
 		*seqp = seq;
-	}
 	return (0);
 }
 #else
 static int
-fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
-    struct file **fpp, seqc_t *seqp __unused)
+fget_unlocked_seq(struct thread *td, int fd, const cap_rights_t *needrightsp,
+    uint8_t *flagsp, struct file **fpp, seqc_t *seqp __unused)
 {
 	struct filedesc *fdp;
 	const struct fdescenttbl *fdt;
 	struct file *fp;
+	uint8_t flags;
 
 	fdp = td->td_proc->p_fd;
 	fdt = fdp->fd_files;
@@ -3293,6 +3323,7 @@ fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
 
 	for (;;) {
 		fp = fdt->fdt_ofiles[fd].fde_file;
+		flags = fdt->fdt_ofiles[fd].fde_flags;
 		if (__predict_false(fp == NULL))
 			return (EBADF);
 		if (__predict_false(!refcount_acquire_if_not_zero(&fp->f_count))) {
@@ -3309,6 +3340,8 @@ fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
 			break;
 		fdrop(fp, td);
 	}
+	if (flagsp != NULL)
+		*flagsp = flags;
 	*fpp = fp;
 	return (0);
 }
@@ -3322,8 +3355,8 @@ fget_unlocked_seq(struct thread *td, int fd, cap_rights_t *needrightsp,
  * racing with itself.
  */
 int
-fget_unlocked(struct thread *td, int fd, cap_rights_t *needrightsp,
-    struct file **fpp)
+fget_unlocked_flags(struct thread *td, int fd, const cap_rights_t *needrightsp,
+    uint8_t *flagsp, struct file **fpp)
 {
 	struct filedesc *fdp;
 #ifdef CAPABILITIES
@@ -3335,6 +3368,7 @@ fget_unlocked(struct thread *td, int fd, cap_rights_t *needrightsp,
 	seqc_t seq;
 	const cap_rights_t *haverights;
 #endif
+	uint8_t flags;
 
 	fdp = td->td_proc->p_fd;
 	fdt = fdp->fd_files;
@@ -3347,8 +3381,10 @@ fget_unlocked(struct thread *td, int fd, cap_rights_t *needrightsp,
 	fde = &fdt->fdt_ofiles[fd];
 	haverights = cap_rights_fde_inline(fde);
 	fp = fde->fde_file;
+	flags = fde->fde_flags;
 #else
 	fp = fdt->fdt_ofiles[fd].fde_file;
+	flags = fdt->fdt_ofiles[fd].fde_flags;
 #endif
 	if (__predict_false(fp == NULL))
 		goto out_fallback;
@@ -3372,12 +3408,21 @@ fget_unlocked(struct thread *td, int fd, cap_rights_t *needrightsp,
 #endif
 		goto out_fdrop;
 	*fpp = fp;
+	if (flagsp != NULL)
+		*flagsp = flags;
 	return (0);
 out_fdrop:
 	fdrop(fp, td);
 out_fallback:
 	*fpp = NULL;
-	return (fget_unlocked_seq(td, fd, needrightsp, fpp, NULL));
+	return (fget_unlocked_seq(td, fd, needrightsp, flagsp, fpp, NULL));
+}
+
+int
+fget_unlocked(struct thread *td, int fd, const cap_rights_t *needrightsp,
+    struct file **fpp)
+{
+	return (fget_unlocked_flags(td, fd, needrightsp, NULL, fpp));
 }
 
 /*
@@ -3391,7 +3436,7 @@ out_fallback:
  */
 #ifdef	CAPABILITIES
 int
-fget_only_user(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
+fget_only_user(struct filedesc *fdp, int fd, const cap_rights_t *needrightsp,
     struct file **fpp)
 {
 	const struct filedescent *fde;
@@ -3421,7 +3466,7 @@ fget_only_user(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
 }
 #else
 int
-fget_only_user(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
+fget_only_user(struct filedesc *fdp, int fd, const cap_rights_t *needrightsp,
     struct file **fpp)
 {
 	struct file *fp;
@@ -3457,7 +3502,7 @@ fget_only_user(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
  */
 static __inline int
 _fget(struct thread *td, int fd, struct file **fpp, int flags,
-    cap_rights_t *needrightsp)
+    const cap_rights_t *needrightsp)
 {
 	struct file *fp;
 	int error;
@@ -3503,15 +3548,15 @@ _fget(struct thread *td, int fd, struct file **fpp, int flags,
 }
 
 int
-fget(struct thread *td, int fd, cap_rights_t *rightsp, struct file **fpp)
+fget(struct thread *td, int fd, const cap_rights_t *rightsp, struct file **fpp)
 {
 
 	return (_fget(td, fd, fpp, 0, rightsp));
 }
 
 int
-fget_mmap(struct thread *td, int fd, cap_rights_t *rightsp, vm_prot_t *maxprotp,
-    struct file **fpp)
+fget_mmap(struct thread *td, int fd, const cap_rights_t *rightsp,
+    vm_prot_t *maxprotp, struct file **fpp)
 {
 	int error;
 #ifndef CAPABILITIES
@@ -3529,7 +3574,7 @@ fget_mmap(struct thread *td, int fd, cap_rights_t *rightsp, vm_prot_t *maxprotp,
 	fdp = td->td_proc->p_fd;
 	MPASS(cap_rights_is_set(rightsp, CAP_MMAP));
 	for (;;) {
-		error = fget_unlocked_seq(td, fd, rightsp, &fp, &seq);
+		error = fget_unlocked_seq(td, fd, rightsp, NULL, &fp, &seq);
 		if (__predict_false(error != 0))
 			return (error);
 		if (__predict_false(fp->f_ops == &badfileops)) {
@@ -3554,22 +3599,24 @@ fget_mmap(struct thread *td, int fd, cap_rights_t *rightsp, vm_prot_t *maxprotp,
 }
 
 int
-fget_read(struct thread *td, int fd, cap_rights_t *rightsp, struct file **fpp)
+fget_read(struct thread *td, int fd, const cap_rights_t *rightsp,
+    struct file **fpp)
 {
 
 	return (_fget(td, fd, fpp, FREAD, rightsp));
 }
 
 int
-fget_write(struct thread *td, int fd, cap_rights_t *rightsp, struct file **fpp)
+fget_write(struct thread *td, int fd, const cap_rights_t *rightsp,
+    struct file **fpp)
 {
 
 	return (_fget(td, fd, fpp, FWRITE, rightsp));
 }
 
 int
-fget_fcntl(struct thread *td, int fd, cap_rights_t *rightsp, int needfcntl,
-    struct file **fpp)
+fget_fcntl(struct thread *td, int fd, const cap_rights_t *rightsp,
+    int needfcntl, struct file **fpp)
 {
 #ifndef CAPABILITIES
 	return (fget_unlocked(td, fd, rightsp, fpp));
@@ -3582,7 +3629,7 @@ fget_fcntl(struct thread *td, int fd, cap_rights_t *rightsp, int needfcntl,
 	*fpp = NULL;
 	MPASS(cap_rights_is_set(rightsp, CAP_FCNTL));
 	for (;;) {
-		error = fget_unlocked_seq(td, fd, rightsp, &fp, &seq);
+		error = fget_unlocked_seq(td, fd, rightsp, NULL, &fp, &seq);
 		if (error != 0)
 			return (error);
 		error = cap_fcntl_check(fdp, fd, needfcntl);
@@ -3607,7 +3654,7 @@ fget_fcntl(struct thread *td, int fd, cap_rights_t *rightsp, int needfcntl,
  * XXX: what about the unused flags ?
  */
 static __inline int
-_fgetvp(struct thread *td, int fd, int flags, cap_rights_t *needrightsp,
+_fgetvp(struct thread *td, int fd, int flags, const cap_rights_t *needrightsp,
     struct vnode **vpp)
 {
 	struct file *fp;
@@ -3629,21 +3676,22 @@ _fgetvp(struct thread *td, int fd, int flags, cap_rights_t *needrightsp,
 }
 
 int
-fgetvp(struct thread *td, int fd, cap_rights_t *rightsp, struct vnode **vpp)
+fgetvp(struct thread *td, int fd, const cap_rights_t *rightsp,
+    struct vnode **vpp)
 {
 
 	return (_fgetvp(td, fd, 0, rightsp, vpp));
 }
 
 int
-fgetvp_rights(struct thread *td, int fd, cap_rights_t *needrightsp,
+fgetvp_rights(struct thread *td, int fd, const cap_rights_t *needrightsp,
     struct filecaps *havecaps, struct vnode **vpp)
 {
 	struct filecaps caps;
 	struct file *fp;
 	int error;
 
-	error = fget_cap(td, fd, needrightsp, &fp, &caps);
+	error = fget_cap(td, fd, needrightsp, NULL, &fp, &caps);
 	if (error != 0)
 		return (error);
 	if (fp->f_ops == &badfileops) {
@@ -3668,14 +3716,16 @@ out:
 }
 
 int
-fgetvp_read(struct thread *td, int fd, cap_rights_t *rightsp, struct vnode **vpp)
+fgetvp_read(struct thread *td, int fd, const cap_rights_t *rightsp,
+    struct vnode **vpp)
 {
 
 	return (_fgetvp(td, fd, FREAD, rightsp, vpp));
 }
 
 int
-fgetvp_exec(struct thread *td, int fd, cap_rights_t *rightsp, struct vnode **vpp)
+fgetvp_exec(struct thread *td, int fd, const cap_rights_t *rightsp,
+    struct vnode **vpp)
 {
 
 	return (_fgetvp(td, fd, FEXEC, rightsp, vpp));
@@ -3683,7 +3733,7 @@ fgetvp_exec(struct thread *td, int fd, cap_rights_t *rightsp, struct vnode **vpp
 
 #ifdef notyet
 int
-fgetvp_write(struct thread *td, int fd, cap_rights_t *rightsp,
+fgetvp_write(struct thread *td, int fd, const cap_rights_t *rightsp,
     struct vnode **vpp)
 {
 

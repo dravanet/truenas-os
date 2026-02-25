@@ -375,7 +375,7 @@ kern_fstatfs(struct thread *td, int fd, struct statfs *buf)
 	int error;
 
 	AUDIT_ARG_FD(fd);
-	error = getvnode_path(td, fd, &cap_fstatfs_rights, &fp);
+	error = getvnode_path(td, fd, &cap_fstatfs_rights, NULL, &fp);
 	if (error != 0)
 		return (error);
 	vp = fp->f_vnode;
@@ -898,12 +898,17 @@ sys_fchdir(struct thread *td, struct fchdir_args *uap)
 	struct mount *mp;
 	struct file *fp;
 	int error;
+	uint8_t fdflags;
 
 	AUDIT_ARG_FD(uap->fd);
-	error = getvnode_path(td, uap->fd, &cap_fchdir_rights,
+	error = getvnode_path(td, uap->fd, &cap_fchdir_rights, &fdflags,
 	    &fp);
 	if (error != 0)
 		return (error);
+	if ((fdflags & UF_RESOLVE_BENEATH) != 0) {
+		fdrop(fp, td);
+		return (ENOTCAPABLE);
+	}
 	vp = fp->f_vnode;
 	vrefact(vp);
 	fdrop(fp, td);
@@ -1252,6 +1257,10 @@ success:
 		else
 #endif
 			fcaps = NULL;
+		if ((nd.ni_resflags & NIRES_BENEATH) != 0)
+			flags |= O_RESOLVE_BENEATH;
+		else
+			flags &= ~O_RESOLVE_BENEATH;
 		error = finstall_refed(td, fp, &indx, flags, fcaps);
 		/* On success finstall_refed() consumes fcaps. */
 		if (error != 0) {
@@ -1939,7 +1948,7 @@ kern_funlinkat(struct thread *td, int dfd, const char *path, int fd,
 
 	fp = NULL;
 	if (fd != FD_NONE) {
-		error = getvnode_path(td, fd, &cap_no_rights, &fp);
+		error = getvnode_path(td, fd, &cap_no_rights, NULL, &fp);
 		if (error != 0)
 			return (error);
 	}
@@ -4335,13 +4344,13 @@ out:
  * semantics.
  */
 int
-getvnode_path(struct thread *td, int fd, cap_rights_t *rightsp,
-    struct file **fpp)
+getvnode_path(struct thread *td, int fd, const cap_rights_t *rightsp,
+    uint8_t *flagsp, struct file **fpp)
 {
 	struct file *fp;
 	int error;
 
-	error = fget_unlocked(td, fd, rightsp, &fp);
+	error = fget_unlocked_flags(td, fd, rightsp, flagsp, &fp);
 	if (error != 0)
 		return (error);
 
@@ -4373,11 +4382,12 @@ getvnode_path(struct thread *td, int fd, cap_rights_t *rightsp,
  * A reference on the file entry is held upon returning.
  */
 int
-getvnode(struct thread *td, int fd, cap_rights_t *rightsp, struct file **fpp)
+getvnode(struct thread *td, int fd, const cap_rights_t *rightsp,
+    struct file **fpp)
 {
 	int error;
 
-	error = getvnode_path(td, fd, rightsp, fpp);
+	error = getvnode_path(td, fd, rightsp, NULL, fpp);
 	if (__predict_false(error != 0))
 		return (error);
 
