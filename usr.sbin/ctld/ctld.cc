@@ -2415,7 +2415,7 @@ main_loop(struct conf *conf, bool dont_fork)
 			error = kevent(kqfd, NULL, 0, &kev, 1, NULL);
 			if (error == -1) {
 				if (errno == EINTR)
-					continue;
+					return;
 				log_err(1, "kevent");
 			}
 
