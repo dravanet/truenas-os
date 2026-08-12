@@ -769,20 +769,10 @@ portal_group::verify(struct conf *conf)
 	if (pg_discovery_filter == discovery_filter::UNKNOWN)
 		pg_discovery_filter = discovery_filter::NONE;
 
-	if (!pg_redirection.empty()) {
-		if (!pg_ports.empty()) {
-			log_debugx("%s \"%s\" assigned to target, "
-			    "but configured for redirection", keyword(),
-			    name());
-		}
-		pg_assigned = true;
-	} else if (!pg_ports.empty()) {
-		pg_assigned = true;
-	} else {
-		if (pg_name != "default")
-			log_warnx("%s \"%s\" not assigned "
-			    "to any target", keyword(), name());
-		pg_assigned = false;
+	if (!pg_redirection.empty() && !pg_ports.empty()) {
+		log_debugx("%s \"%s\" assigned to target, "
+		    "but configured for redirection", keyword(),
+		    name());
 	}
 }
 
@@ -807,12 +797,6 @@ portal_group::open_sockets(struct conf &oldconf)
 
 	if (pg_foreign)
 		return (0);
-
-	if (!pg_assigned) {
-		log_debugx("not listening on %s \"%s\", "
-		    "not assigned to any target", keyword(), name());
-		return (0);
-	}
 
 	for (portal_up &portal : pg_portals) {
 		/*
@@ -919,8 +903,6 @@ conf::isns_register_request(const char *hostname)
 	for (const auto &kv : conf_portal_groups) {
 		pg = kv.second.get();
 
-		if (!pg->assigned())
-			continue;
 		for (const portal_up &portal : pg->portals()) {
 			req.add_addr(16, portal->ai());
 			req.add_port(17, portal->ai());

@@ -192,7 +192,6 @@ struct portal_group {
 	struct conf *conf() const { return pg_conf; }
 	virtual const char *keyword() const = 0;
 	const char *name() const { return pg_name.c_str(); }
-	bool assigned() const { return pg_assigned; }
 	bool is_dummy() const;
 	bool is_redirecting() const { return !pg_redirection.empty(); }
 	struct auth_group *discovery_auth_group() const
@@ -250,7 +249,6 @@ protected:
 	enum discovery_filter		pg_discovery_filter =
 	    discovery_filter::UNKNOWN;
 	bool				pg_foreign = false;
-	bool				pg_assigned = false;
 	std::list<portal_up>	        pg_portals;
 	std::unordered_map<std::string, port *> pg_ports;
 	std::string			pg_offload;
