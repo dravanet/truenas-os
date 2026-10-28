@@ -12,6 +12,55 @@ Items affecting the ports and packages system can be found in
 /usr/ports/UPDATING.  Please read that file before updating system packages
 and/or ports.
 
+20261021:
+	15.1-RELEASE-p6	SA-26:73.caroot
+
+	TLS certificate store updates. [SA-26:73.caroot]
+
+20261014:
+	15.1-RELEASE-p5	EN-26:25.tzdata
+			EN-26:26.hastd
+			EN-26:27.tcp
+			SA-26:70.tcp
+			SA-26:71.sound
+			SA-26:72.bhyve
+
+	Timezone database information update. [EN-26:25.tzdata]
+
+	Multiple issues in hastd(8). [EN-26:26.hastd]
+
+	TCP timers may overflow and fire late or not at all. [EN-26:27.tcp]
+
+	Remotely triggerable buffer overflow in tcp_rack. [SA-26:70.tcp]
+
+	TOCTOU race between sound(4) buffer resizing and mmap. [SA-26:71.sound]
+
+	Multiple vulnerabilities in bhyve device models. [SA-26:72.bhyve]
+
+20260928:
+	15.1-RELEASE-p4	EN-26:23.syslogd
+			EN-26:24.tzdata
+			SA-26:64.sysvsem
+			SA-26:65.kqueue
+			SA-26:66.jail
+			SA-26:67.ktls
+			SA-26:68.openssl
+			SA-26:69.udp
+
+	Timezone database information update. [EN-26:24.tzdata]
+
+	Heap out-of-bounds access in semop(2). [SA-26:64.sysvsem]
+
+	Memory safety bugs in kqueue copy-on-fork implementation. [SA-26:65.kqueue]
+
+	Multiple jail filesystem root escapes. [SA-26:66.jail]
+
+	Remote DOS via receive-side kernel TLS. [SA-26:67.ktls]
+
+	OpenSSL CVE-2026-84782. [SA-268:68.openssl]
+
+	UDP sendto(2) bypasses jail network isolation. [SA-26:69.udp]
+
 20260825:
 	15.1-RELEASE-p3	EN-26:20.microcode
 			SA-26:56.hwpmc
